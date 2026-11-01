@@ -1,5 +1,6 @@
 import os
 import random
+import re
 import shutil
 from dataclasses import dataclass
 
@@ -133,6 +134,37 @@ def load_training_state(
     return TrainingResumeState(next_micro_step=next_micro_step)
 
 
+_STEP_DIR_PATTERN = re.compile(r"^step_(\d+)$")
+
+
+def prune_old_checkpoints(checkpoint_dir_root: str, keep_last_n: int | None) -> None:
+    """Delete old ``step_*`` checkpoint directories, keeping the newest N.
+
+    Online training checkpoints contain a full fp32 AdamW state per rank, so a
+    single checkpoint can be tens of gigabytes.  Pruning keeps long runs from
+    filling the filesystem.  Only direct children with a numeric ``step_`` name
+    are considered; the ``step_latest`` symlink is never touched.
+    """
+    if keep_last_n is None:
+        return
+    keep_last_n = int(keep_last_n)
+    if keep_last_n <= 0:
+        return
+    candidates = []
+    with os.scandir(checkpoint_dir_root) as entries:
+        for entry in entries:
+            if not entry.is_dir(follow_symlinks=False):
+                continue
+            match = _STEP_DIR_PATTERN.match(entry.name)
+            if match is None:
+                continue
+            candidates.append((int(match.group(1)), entry.path))
+    candidates.sort()
+    for _, path in candidates[:-keep_last_n]:
+        print_on_global_main(f"Pruning old checkpoint: {path}")
+        shutil.rmtree(path)
+
+
 def save_checkpoint(
     *,
     model,
@@ -145,6 +177,7 @@ def save_checkpoint(
     global_rank: int,
     world_size: int,
     local_batch_size: int,
+    max_checkpoints_to_keep: int | None = None,
 ) -> str:
     assert next_micro_step % gradient_accumulation_steps == 0, (
         "next_micro_step must be aligned with gradient_accumulation_steps at "
@@ -181,6 +214,10 @@ def save_checkpoint(
             os.path.join(checkpoint_dir_root, "step_latest"),
         )
         print_on_global_main(f"Saved checkpoint to {checkpoint_dir}")
+        prune_old_checkpoints(
+            checkpoint_dir_root=checkpoint_dir_root,
+            keep_last_n=max_checkpoints_to_keep,
+        )
     dist.barrier()
     return checkpoint_dir
 

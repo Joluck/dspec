@@ -23,11 +23,18 @@ class Qwen3DSparkTrainer(BaseTrainer):
 
     # Training step.
     def run_batch(self, batch):
+        if self.online:
+            target_output = self._extract_online_target_hidden_states(batch)
+            target_hidden_states = target_output.target_hidden_states
+            target_last_hidden_states = target_output.target_last_hidden_states
+        else:
+            target_hidden_states = batch["target_hidden_states"]
+            target_last_hidden_states = batch["target_last_hidden_states"]
         outputs = self.model(
             input_ids=batch["input_ids"],
-            target_hidden_states=batch["target_hidden_states"],
+            target_hidden_states=target_hidden_states,
             loss_mask=batch["loss_mask"],
-            target_last_hidden_states=batch["target_last_hidden_states"],
+            target_last_hidden_states=target_last_hidden_states,
         )
         loss = compute_dspark_loss(
             outputs=outputs,

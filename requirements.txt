@@ -16,3 +16,6 @@ prettytable==3.17.0
 # Data preparation dependencies.
 datasets==4.8.5
 openai==2.6.1
+
+# Optional experiment tracking (logging.wandb in the configs).
+wandb==0.31.0

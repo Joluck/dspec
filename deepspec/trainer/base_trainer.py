@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import json
 import math
 import os
 
@@ -10,17 +11,25 @@ from torch.distributed.fsdp import MixedPrecision, ShardingStrategy
 from torch.utils.data import DataLoader
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
-from deepspec.data import CacheDataset, validate_train_cache
+from deepspec.data import (
+    CacheDataset,
+    OnlineConversationCollator,
+    OnlineJsonDataset,
+    validate_train_cache,
+)
 from deepspec.data.cuda_prefetcher import CUDAPrefetcher
 from deepspec.utils import (
     BF16Optimizer,
+    CustomJSONEncoder,
     StatelessResumableDistributedSampler,
     ensure_dir,
     init_dist,
     is_global_main_process,
+    main_process_first,
     print_on_global_main,
     print_on_local_main,
 )
+from deepspec.modeling.target_forward import run_target_forward_with_hooks
 from deepspec.trainer.ckpt_manager import (
     discover_latest_checkpoint,
     load_resume_draft_model,
@@ -159,6 +168,8 @@ class BaseTrainer:
         self.args = args
         self.device, self.global_rank, self.world_size = init_dist(local_rank)
         self.precision_dtype = _PRECISION_DTYPES[self.args.train.precision]
+        self.online = bool(self.args.data.get("online", False))
+        self.target_model = None
         self.checkpoint_dir_root = self.args.logging.checkpoint_dir
         self.resume_checkpoint_dir = discover_latest_checkpoint(
             self.checkpoint_dir_root
@@ -167,9 +178,18 @@ class BaseTrainer:
         self.next_micro_step = 0
 
         if is_global_main_process(): ensure_dir(self.checkpoint_dir_root)
+        wandb_config = self.args.logging.get("wandb")
+        wandb_payload = None
+        if wandb_config:
+            wandb_payload = json.loads(
+                json.dumps(self.args, cls=CustomJSONEncoder)
+            )
         training_logger.init(
             logging_steps=int(self.args.logging.logging_steps),
             tensorboard_dir=self.args.logging.tensorboard_dir,
+            wandb_config=wandb_config,
+            run_name=self.args.get("exp_name"),
+            run_config=wandb_payload,
         )
 
         self.draft_model, self.tokenizer = self.build_models()
@@ -187,12 +207,28 @@ class BaseTrainer:
             self.model = torch.compile(self.model, dynamic=True)
         self.model = self._wrap_with_fsdp(self.model)
 
-        self.train_dataset = CacheDataset(cache_dir=self.args.data.target_cache_path)
-        validate_train_cache(
-            train_dataset=self.train_dataset,
-            draft_model=self.draft_model,
-            target_model_name_or_path=self.args.model.target_model_name_or_path,
-        )
+        if self.online:
+            with main_process_first():
+                self.train_dataset = OnlineJsonDataset(
+                    data_paths=self.args.data.train_data_paths,
+                    max_samples=self.args.data.get("max_samples"),
+                )
+            self.data_collator = OnlineConversationCollator(
+                tokenizer=self.tokenizer,
+                chat_template=str(self.args.data.chat_template),
+                max_length=int(self.args.data.max_length),
+                min_loss_tokens=int(self.args.data.get("min_loss_tokens", 14)),
+            )
+        else:
+            self.train_dataset = CacheDataset(
+                cache_dir=self.args.data.target_cache_path
+            )
+            validate_train_cache(
+                train_dataset=self.train_dataset,
+                draft_model=self.draft_model,
+                target_model_name_or_path=self.args.model.target_model_name_or_path,
+            )
+            self.data_collator = self.data_collator_cls()
 
         (
             self.gradient_accumulation_steps,
@@ -239,6 +275,9 @@ class BaseTrainer:
 
     def info_board(self):
         print_on_local_main("***** Running training *****")
+        print_on_local_main(
+            f"  Data mode = {'online (target forward per batch)' if self.online else 'offline (target cache)'}"
+        )
         print_on_local_main(f"  Train dataset size = {len(self.train_dataset)}")
         print_on_local_main(f"  Num train epochs = {self.args.train.num_train_epochs}")
         print_on_local_main(f"  Samples per epoch = {self.samples_per_epoch}")
@@ -264,11 +303,13 @@ class BaseTrainer:
         )
         draft_model = draft_model.to(device=self.device, dtype=self.precision_dtype)
 
-        # Training only uses the target checkpoint to initialize frozen draft
-        # embeddings and lm_head weights.
+        # The target checkpoint initializes the frozen draft embeddings/lm_head.
+        # Offline training then drops it; online training keeps the frozen
+        # backbone on the GPU and runs it once per micro-batch.
         target_model = AutoModelForCausalLM.from_pretrained(
             model_args.target_model_name_or_path,
             dtype=self.precision_dtype,
+            attn_implementation="sdpa",
         ).to(device="cpu").eval()
         target_embed_tokens = target_model.get_input_embeddings()
         target_lm_head = target_model.get_output_embeddings()
@@ -278,7 +319,15 @@ class BaseTrainer:
             lm_head=target_lm_head,
             freeze=True,
         )
-        del target_model
+        if self.online:
+            target_model = target_model.to(device=self.device).eval()
+            target_model.requires_grad_(False)
+            self.target_model = target_model
+            print_on_local_main(
+                "Online target model loaded for on-the-fly hidden-state extraction."
+            )
+        else:
+            del target_model
         return draft_model, tokenizer
 
     def _build_draft_model(self, *, target_config, model_args):
@@ -301,16 +350,29 @@ class BaseTrainer:
             start_global_offset_samples=start_offset_samples,
             num_samples=num_samples,
         )
+        num_workers = int(self.args.data.num_workers)
+        dataloader_kwargs = {}
+        if num_workers > 0:
+            dataloader_kwargs["persistent_workers"] = True
+            dataloader_kwargs["prefetch_factor"] = 4
         return DataLoader(
             self.train_dataset,
             batch_size=int(self.args.train.local_batch_size),
             sampler=sampler,
-            collate_fn=self.data_collator_cls(),
-            num_workers=int(self.args.data.num_workers),
+            collate_fn=self.data_collator,
+            num_workers=num_workers,
             pin_memory=True,
             drop_last=True,
-            persistent_workers=True,
-            prefetch_factor=4,
+            **dataloader_kwargs,
+        )
+
+    def _extract_online_target_hidden_states(self, batch):
+        assert self.online and self.target_model is not None
+        return run_target_forward_with_hooks(
+            target_model=self.target_model,
+            input_ids=batch["input_ids"],
+            attention_mask=batch["attention_mask"],
+            target_layer_ids=self.draft_model.target_layer_ids,
         )
 
     def run_batch(self, batch):
@@ -328,6 +390,9 @@ class BaseTrainer:
             global_rank=self.global_rank,
             world_size=self.world_size,
             local_batch_size=int(self.args.train.local_batch_size),
+            max_checkpoints_to_keep=self.args.logging.get(
+                "max_checkpoints_to_keep"
+            ),
         )
 
     def save_and_eval_checkpoint(self):

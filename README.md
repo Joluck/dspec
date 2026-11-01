@@ -16,8 +16,8 @@ Data preparation additionally requires an inference engine to serve the target m
 
 Run the stages in order — each stage's output feeds the next:
 
-1. **Data Preparation** — download prompts, regenerate target answers, and build the target cache.
-2. **Training** — train a draft model against the cached target outputs.
+1. **Data Preparation** — download prompts and (optionally) regenerate target answers.
+2. **Training** — train a draft model either online (frozen target model runs in the training loop) or offline (against a precomputed target cache).
 3. **Evaluation** — measure speculative-decoding acceptance on benchmark tasks.
 
 ## Data Preparation
@@ -25,8 +25,13 @@ Run the stages in order — each stage's output feeds the next:
 See [scripts/data/README.md](./scripts/data/README.md) for the step-by-step data pipeline:
 
 1. download and split training data,
-2. regenerate answers,
-3. prepare the target cache (storage warning: this can be very large — roughly 38 TB for the default `Qwen/Qwen3-4B` setting).
+2. regenerate answers (recommended; online training also accepts the raw split),
+3. *offline training only:* prepare the target cache (storage warning: this can be very large — roughly 38 TB for the default `Qwen/Qwen3-4B` setting).
+
+Online training needs only the conversation JSONL from step 1/2. The target
+model runs inside the training loop, so step 3 — and the 38 TB cache — can be
+skipped entirely. Set `data.train_data_paths` to one or more conversation
+JSONL files.
 
 ## Training
 
@@ -34,9 +39,80 @@ See [scripts/data/README.md](./scripts/data/README.md) for the step-by-step data
 bash scripts/train/train.sh
 ```
 
-`train.sh` launches `train.py`, which spawns one worker per visible GPU. Select the algorithm and target model by pointing `config_path` at one of the configs under [config/](./config/) (e.g. `config/dspark/dspark_qwen3_4b.py`); see the script header for the full list of configs, how to override `config_path` / `target_cache_dir`, and how to use `--opts` to override individual config fields. Checkpoints are written to `~/checkpoints/<project_name>/<exp_name>/step_*`.
+`train.sh` launches `train.py`, which spawns one worker per visible GPU.
+By default it runs **online** DSpark training for Qwen3-4B
+([config/dspark/dspark_qwen3_4b_online.py](./config/dspark/dspark_qwen3_4b_online.py)):
+each rank keeps a frozen copy of the target model, runs it once per micro-batch,
+and feeds the captured hidden states to the draft model. This removes the
+multi-terabyte target cache and lets you change the training data without
+recomputing it.
 
-Hardware: the default configs and scripts assume a single node with 8 GPUs. For fewer GPUs, reduce `CUDA_VISIBLE_DEVICES`.
+```bash
+# online (default)
+bash scripts/train/train.sh
+
+# choose another conversation JSONL / cap the dataset
+TRAIN_DATA=/path/to/train.jsonl MAX_SAMPLES=100000 bash scripts/train/train.sh
+```
+
+To use the original offline path, point `CONFIG` at a cache config and pass the
+cache directory explicitly:
+
+```bash
+CONFIG=config/dspark/dspark_qwen3_4b.py \
+EXTRA_OPTS="--opts data.target_cache_path=${HOME}/.cache/deepspec/qwen3_4b_target_cache" \
+bash scripts/train/train.sh
+```
+
+See the script header for the full list of configs and `--opts` overrides.
+Checkpoints are written to `~/checkpoints/<project_name>/<exp_name>/step_*`.
+Online checkpoints store a full fp32 optimizer state per rank, so the online
+config keeps only the two newest ones (`logging.max_checkpoints_to_keep`).
+
+Hardware: the published configs assume a single node with 8 GPUs. The online
+Qwen3-4B config is sized for 4x 98GB GPUs (`local_batch_size=8`,
+`num_anchors=128`, `max_length=2048`); lower `local_batch_size` or
+`num_anchors`, or reduce `max_length`, on smaller cards.
+
+### Equal-budget comparison (Eagle3 / DFlash / DSpark)
+
+`scripts/train/compare_1000.sh` trains all three online draft algorithms for
+the same **1000 optimizer steps**, on the same Qwen3-4B data, with the same
+global batch of 64, and logs every run to Weights & Biases:
+
+```bash
+bash scripts/train/compare_1000.sh
+```
+
+The three runs are named `dspark_1000`, `dflash_1000`, and `eagle3_1000` in
+project `deepspec` (entity is set in each config's `logging.wandb` block).
+Eagle3 uses a per-GPU micro-batch of 4 because its 7-step TTT keeps more
+activation memory; DFlash/DSpark use 8. The global batch stays 64 for all.
+
+After training, evaluate the three checkpoints on identical held-out tasks:
+
+```bash
+bash scripts/eval/compare_1000_eval.sh
+```
+
+W&B is enabled per config via `logging.wandb = dict(project=..., entity=...,
+name=..., mode="online")`. Set `name=None` to use `exp_name` as the run name.
+
+### LightMLP ablation (Eagle3 without attention)
+
+`config/lightmlp/lightmlp_qwen3_4b_online.py` keeps Eagle3's target-hidden
+projection, 7-step TTT objective and frozen embeddings/LM head, but replaces
+the decoder layer's attention block with a `2h -> h` projection followed by the
+Qwen3 MLP. There is no KV cache and no token mixing, so this is a per-position
+MLP recurrence:
+
+```bash
+CONFIG=config/lightmlp/lightmlp_qwen3_4b_online.py \
+bash scripts/train/train.sh
+```
+
+Its evaluator is registered as `Qwen3LightMLPModel`, so the normal
+`eval.py` / `scripts/eval/eval.sh` flow works unchanged.
 
 
 ## Evaluation
@@ -49,6 +125,15 @@ bash scripts/eval/eval.sh
 
 - `target_name_or_path` — the target model the draft was trained against (e.g. `Qwen/Qwen3-4B`),
 - `draft_name_or_path` — the draft checkpoint, e.g. `~/checkpoints/deepspec/dspark_block7_qwen3_4b/step_latest`, or one of the Hugging Face repo IDs listed in [Released Checkpoints](#released-checkpoints).
+
+For a quick acceptance check, restrict the task list and sample count, e.g.:
+
+```bash
+python eval.py \
+    --target_name_or_path /path/to/Qwen3-4B \
+    --draft_name_or_path ~/checkpoints/deepspec/dspark_online_qwen3_4b/step_latest \
+    --tasks gsm8k alpaca --task-max-samples 64 --max-new-tokens 512
+```
 
 ### Released Checkpoints
 

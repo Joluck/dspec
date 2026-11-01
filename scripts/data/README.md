@@ -100,9 +100,16 @@ train_datasets/qwen3_4b/perfectblend_train_regen_error.jsonl
 
 Stop the sglang servers before the next step if they are using the same GPUs.
 
-## Step 3: Prepare Target Cache
+## Step 3: Prepare Target Cache (offline training only)
 
-The training loop reads a precomputed target cache instead of repeatedly running the target model. Prepare it with:
+**Online training does not need this step.** The online trainer
+(`config/dspark/dspark_qwen3_4b_online.py`, the default in
+`scripts/train/train.sh`) reads the conversation JSONL directly and runs the
+frozen target model inside the training loop. Skip to
+[Training](../train/train.sh) after step 2 (or after step 1 if you do not need
+target-regenerated answers).
+
+Offline training instead reads a precomputed target cache. Prepare it with:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python scripts/data/prepare_target_cache.py \
@@ -120,11 +127,15 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 python scripts/data/prepare_target_cache.py
 > use a smaller training set and/or reduce `model.target_layer_ids` in the config
 > (fewer captured layers means proportionally less cache).
 
-This produces the cache consumed by [scripts/train/train.sh](../train/train.sh):
+This produces the cache consumed by the offline training configs:
 
 ```text
 ~/.cache/deepspec/qwen3_4b_target_cache
 ```
+
+The online config consumes the conversation JSONL from step 1/2 directly, e.g.
+`train_datasets/qwen3_4b/perfectblend_train_regen.jsonl` or a smaller split such
+as `train_datasets/perfectblend_train_60k.jsonl`.
 
 ## Wrapper Script
 

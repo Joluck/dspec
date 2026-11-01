@@ -8,17 +8,59 @@ from deepspec.utils.metrics import add_metric, flush, reset
 
 
 _writer: Optional[SummaryWriter] = None
+_wandb_run = None
 _logging_steps: int = 1
 _session_start_wall: Optional[float] = None
 _session_start_step: int = 0
 
 
-def init(*, logging_steps: int, tensorboard_dir: Optional[str] = None) -> None:
-    global _writer, _logging_steps
+def init(
+    *,
+    logging_steps: int,
+    tensorboard_dir: Optional[str] = None,
+    wandb_config=None,
+    run_name: Optional[str] = None,
+    run_config=None,
+) -> None:
+    global _writer, _wandb_run, _logging_steps
     _logging_steps = int(logging_steps)
     if tensorboard_dir is not None and is_global_main_process():
         ensure_dir(tensorboard_dir)
         _writer = SummaryWriter(tensorboard_dir)
+    if wandb_config and is_global_main_process():
+        import os
+
+        import wandb
+
+        # train.py historically forced this on; clear it when the user asks for
+        # wandb explicitly.
+        os.environ.pop("WANDB_DISABLED", None)
+        mode = os.environ.get("WANDB_MODE") or wandb_config.get("mode", "online")
+        init_kwargs = dict(
+            project=wandb_config.get("project", "deepspec"),
+            entity=wandb_config.get("entity"),
+            name=wandb_config.get("name") or run_name,
+            dir=wandb_config.get("dir"),
+            config=run_config,
+        )
+        try:
+            _wandb_run = wandb.init(mode=mode, **init_kwargs)
+        except Exception as exc:
+            # The W&B server can be temporarily unreachable / reject the stored
+            # key.  Do not take the whole training run down: record locally and
+            # let the user `wandb sync` the offline run later.
+            print_on_global_main(
+                f"wandb init failed in mode={mode!r} ({exc!r}); "
+                "falling back to offline mode."
+            )
+            try:
+                _wandb_run = wandb.init(mode="offline", **init_kwargs)
+            except Exception as fallback_exc:
+                print_on_global_main(
+                    f"wandb offline fallback also failed ({fallback_exc!r}); "
+                    "continuing without wandb."
+                )
+                _wandb_run = None
 
 
 def start_session(*, global_step: int) -> None:
@@ -57,17 +99,21 @@ def on_optimizer_step(
 
 
 def close() -> None:
-    global _writer
+    global _writer, _wandb_run
     if _writer is not None:
         _writer.close()
         _writer = None
+    if _wandb_run is not None:
+        _wandb_run.finish()
+        _wandb_run = None
 
 
 def _write_scalars(summary, *, global_step: int) -> None:
-    if _writer is None:
-        return
-    for key, value in summary.items():
-        _writer.add_scalar(key, value, global_step)
+    if _writer is not None:
+        for key, value in summary.items():
+            _writer.add_scalar(key, value, global_step)
+    if _wandb_run is not None:
+        _wandb_run.log(summary, step=global_step)
 
 
 def _print_summary(

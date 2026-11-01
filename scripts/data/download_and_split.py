@@ -152,25 +152,42 @@ def user_turns(row: dict) -> list[str]:
 def write_train_jsonl(dataset, output_path: Path) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+    skipped = 0
     with output_path.open("w", encoding="utf-8") as handle:
         for row_number, row in enumerate(dataset, start=1):
             converted = normalize_conversations(row)
-            validate_conversations(converted, row_number)
+            try:
+                validate_conversations(converted, row_number)
+            except ValueError as exc:
+                # A small number of source rows contain empty assistant
+                # content or malformed roles.  Dropping them is preferable to
+                # aborting a multi-hour download/split.
+                skipped += 1
+                print(f"skip invalid row {row_number}: {exc}", flush=True)
+                continue
             handle.write(json.dumps(converted, ensure_ascii=False) + "\n")
             count += 1
+    print(f"skipped {skipped} invalid train rows", flush=True)
     return count
 
 
 def write_eval_jsonl(dataset, output_path: Path) -> int:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
+    skipped = 0
     with output_path.open("w", encoding="utf-8") as handle:
         for row_number, row in enumerate(dataset, start=1):
             converted = normalize_conversations(row)
-            validate_conversations(converted, row_number)
+            try:
+                validate_conversations(converted, row_number)
+            except ValueError as exc:
+                skipped += 1
+                print(f"skip invalid eval row {row_number}: {exc}", flush=True)
+                continue
             turns = user_turns(converted)
             handle.write(json.dumps({"turns": turns}, ensure_ascii=False) + "\n")
             count += 1
+    print(f"skipped {skipped} invalid eval rows", flush=True)
     return count
 
 

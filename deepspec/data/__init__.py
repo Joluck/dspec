@@ -1,3 +1,4 @@
+from .online_dataset import OnlineConversationCollator, OnlineJsonDataset
 from .parser import TEMPLATE_REGISTRY
 from .target_cache_dataset import (
     CacheCollator,
@@ -10,6 +11,8 @@ __all__ = [
     "CacheCollator",
     "CacheDataset",
     "ConversationCollator",
+    "OnlineConversationCollator",
+    "OnlineJsonDataset",
     "TEMPLATE_REGISTRY",
     "validate_train_cache",
 ]

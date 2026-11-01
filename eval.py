@@ -1,10 +1,13 @@
 from __future__ import annotations
 import argparse
 import json
+from pathlib import Path
+
 import torch
 from transformers import AutoConfig
 from deepspec.eval.dspark import Gemma4DSparkEvaluator, Qwen3DSparkEvaluator
 from deepspec.eval.eagle3 import Gemma4Eagle3Evaluator, Qwen3Eagle3Evaluator
+from deepspec.eval.lightmlp import Qwen3LightMLPEvaluator
 from deepspec.utils import CustomJSONEncoder
 
 EVALUATORS = {
@@ -13,6 +16,7 @@ EVALUATORS = {
     "Qwen3Eagle3Model": Qwen3Eagle3Evaluator,
     "Gemma4Eagle3Model": Gemma4Eagle3Evaluator,
     "Eagle3DraftModel": Qwen3Eagle3Evaluator,
+    "Qwen3LightMLPModel": Qwen3LightMLPEvaluator,
 }
 
 TASKS = [
@@ -42,8 +46,41 @@ def parse_args():
     parser.add_argument("--tensorboard-dir", type=str, default=None)
     parser.add_argument("--step", type=int, default=None,help=("step for tensorboard logging"),)
     parser.add_argument("--seed", type=int, default=980406)
+    parser.add_argument(
+        "--tasks",
+        nargs="+",
+        default=None,
+        help="Subset of task names to evaluate (default: all tasks in TASKS).",
+    )
+    parser.add_argument(
+        "--task-max-samples",
+        type=int,
+        default=None,
+        help="Cap the number of samples per task (useful for quick checks).",
+    )
     args = parser.parse_args()
-    args.tasks = list(TASKS)
+    task_map = dict(TASKS)
+    if args.tasks is None:
+        args.tasks = list(TASKS)
+    else:
+        for name in args.tasks:
+            if name in task_map:
+                continue
+            # Allow any JSONL that exists under eval_datasets/ as a task, e.g.
+            # a held-out split produced by scripts/data/download_and_split.py.
+            path = Path("eval_datasets") / f"{name}.jsonl"
+            assert path.exists(), (
+                f"Unknown eval task {name!r}: not in {sorted(task_map)} and "
+                f"{path} does not exist."
+            )
+            task_map[name] = 500
+        args.tasks = [(name, task_map[name]) for name in args.tasks]
+    if args.task_max_samples is not None:
+        assert args.task_max_samples > 0
+        args.tasks = [
+            (name, min(count, int(args.task_max_samples)))
+            for name, count in args.tasks
+        ]
     return args
 
 
