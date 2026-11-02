@@ -178,18 +178,18 @@ class BaseTrainer:
         self.next_micro_step = 0
 
         if is_global_main_process(): ensure_dir(self.checkpoint_dir_root)
-        wandb_config = self.args.logging.get("wandb")
-        wandb_payload = None
-        if wandb_config:
-            wandb_payload = json.loads(
+        swanlab_config = self.args.logging.get("swanlab")
+        swanlab_payload = None
+        if swanlab_config:
+            swanlab_payload = json.loads(
                 json.dumps(self.args, cls=CustomJSONEncoder)
             )
         training_logger.init(
             logging_steps=int(self.args.logging.logging_steps),
             tensorboard_dir=self.args.logging.tensorboard_dir,
-            wandb_config=wandb_config,
+            swanlab_config=swanlab_config,
             run_name=self.args.get("exp_name"),
-            run_config=wandb_payload,
+            run_config=swanlab_payload,
         )
 
         self.draft_model, self.tokenizer = self.build_models()

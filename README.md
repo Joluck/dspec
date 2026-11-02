@@ -85,7 +85,7 @@ bash scripts/train/compare_1000.sh
 ```
 
 The three runs are named `dspark_1000`, `dflash_1000`, and `eagle3_1000` in
-project `deepspec` (entity is set in each config's `logging.wandb` block).
+project `deepspec` (workspace is set in each config's `logging.swanlab` block).
 Eagle3 uses a per-GPU micro-batch of 4 because its 7-step TTT keeps more
 activation memory; DFlash/DSpark use 8. The global batch stays 64 for all.
 
@@ -95,8 +95,10 @@ After training, evaluate the three checkpoints on identical held-out tasks:
 bash scripts/eval/compare_1000_eval.sh
 ```
 
-W&B is enabled per config via `logging.wandb = dict(project=..., entity=...,
-name=..., mode="online")`. Set `name=None` to use `exp_name` as the run name.
+SwanLab is enabled per config via
+`logging.swanlab = dict(project=..., workspace=..., name=..., mode="online")`.
+Set `name=None` to use `exp_name` as the run name; set `SWANLAB_MODE=offline`
+to keep the run local if the server is unreachable.
 
 ### LightMLP ablation (Eagle3 without attention)
 

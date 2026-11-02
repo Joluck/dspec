@@ -8,7 +8,7 @@ from deepspec.utils.metrics import add_metric, flush, reset
 
 
 _writer: Optional[SummaryWriter] = None
-_wandb_run = None
+_swanlab_enabled: bool = False
 _logging_steps: int = 1
 _session_start_wall: Optional[float] = None
 _session_start_step: int = 0
@@ -18,49 +18,52 @@ def init(
     *,
     logging_steps: int,
     tensorboard_dir: Optional[str] = None,
-    wandb_config=None,
+    swanlab_config=None,
     run_name: Optional[str] = None,
     run_config=None,
 ) -> None:
-    global _writer, _wandb_run, _logging_steps
+    global _writer, _swanlab_enabled, _logging_steps
     _logging_steps = int(logging_steps)
     if tensorboard_dir is not None and is_global_main_process():
         ensure_dir(tensorboard_dir)
         _writer = SummaryWriter(tensorboard_dir)
-    if wandb_config and is_global_main_process():
+    if swanlab_config and is_global_main_process():
         import os
 
-        import wandb
+        import swanlab
 
-        # train.py historically forced this on; clear it when the user asks for
-        # wandb explicitly.
-        os.environ.pop("WANDB_DISABLED", None)
-        mode = os.environ.get("WANDB_MODE") or wandb_config.get("mode", "online")
+        mode = os.environ.get("SWANLAB_MODE") or swanlab_config.get(
+            "mode", "online"
+        )
         init_kwargs = dict(
-            project=wandb_config.get("project", "deepspec"),
-            entity=wandb_config.get("entity"),
-            name=wandb_config.get("name") or run_name,
-            dir=wandb_config.get("dir"),
+            project=swanlab_config.get("project", "deepspec"),
+            workspace=swanlab_config.get("workspace"),
+            name=swanlab_config.get("name") or run_name,
+            mode=mode,
             config=run_config,
         )
+        log_dir = swanlab_config.get("dir") or swanlab_config.get("log_dir")
+        if log_dir:
+            init_kwargs["log_dir"] = log_dir
         try:
-            _wandb_run = wandb.init(mode=mode, **init_kwargs)
+            swanlab.init(**init_kwargs)
+            _swanlab_enabled = True
         except Exception as exc:
-            # The W&B server can be temporarily unreachable / reject the stored
-            # key.  Do not take the whole training run down: record locally and
-            # let the user `wandb sync` the offline run later.
+            # Do not take down a multi-hour training run if the tracker is
+            # unreachable; keep a local SwanLab run instead.
             print_on_global_main(
-                f"wandb init failed in mode={mode!r} ({exc!r}); "
+                f"swanlab init failed in mode={mode!r} ({exc!r}); "
                 "falling back to offline mode."
             )
             try:
-                _wandb_run = wandb.init(mode="offline", **init_kwargs)
+                swanlab.init(mode="offline", **init_kwargs)
+                _swanlab_enabled = True
             except Exception as fallback_exc:
                 print_on_global_main(
-                    f"wandb offline fallback also failed ({fallback_exc!r}); "
-                    "continuing without wandb."
+                    f"swanlab offline fallback also failed ({fallback_exc!r}); "
+                    "continuing without SwanLab."
                 )
-                _wandb_run = None
+                _swanlab_enabled = False
 
 
 def start_session(*, global_step: int) -> None:
@@ -99,21 +102,39 @@ def on_optimizer_step(
 
 
 def close() -> None:
-    global _writer, _wandb_run
+    global _writer, _swanlab_enabled
     if _writer is not None:
         _writer.close()
         _writer = None
-    if _wandb_run is not None:
-        _wandb_run.finish()
-        _wandb_run = None
+    if _swanlab_enabled:
+        import swanlab
+
+        swanlab.finish()
+        _swanlab_enabled = False
+
+
+def _swanlab_metric_name(name: str) -> str:
+    """Group acceptance-related metrics under accept/ in SwanLab."""
+    if name.startswith("train/accept_rate@"):
+        return "accept/rate@" + name.rsplit("@", 1)[1]
+    if name.startswith("train/accuracy@"):
+        return "accept/accuracy@" + name.rsplit("@", 1)[1]
+    if name in ("train/tau_probabilistic", "train/tau_greedy"):
+        return "accept/" + name.split("/", 1)[1]
+    return name
 
 
 def _write_scalars(summary, *, global_step: int) -> None:
     if _writer is not None:
         for key, value in summary.items():
             _writer.add_scalar(key, value, global_step)
-    if _wandb_run is not None:
-        _wandb_run.log(summary, step=global_step)
+    if _swanlab_enabled:
+        import swanlab
+
+        swanlab.log(
+            {_swanlab_metric_name(key): value for key, value in summary.items()},
+            step=global_step,
+        )
 
 
 def _print_summary(

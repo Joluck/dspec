@@ -17,5 +17,5 @@ prettytable==3.17.0
 datasets==4.8.5
 openai==2.6.1
 
-# Optional experiment tracking (logging.wandb in the configs).
-wandb==0.31.0
+# Optional experiment tracking (logging.swanlab in the configs).
+swanlab==0.10.3

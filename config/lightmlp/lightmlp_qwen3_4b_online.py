@@ -42,9 +42,9 @@ logging = dict(
     logging_steps=10,
     checkpointing_steps=500,
     max_checkpoints_to_keep=1,
-    wandb=dict(
+    swanlab=dict(
         project="deepspec",
-        entity="jl-ai",
+        workspace="joluck",
         name=None,
         mode="online",
     ),

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Train Eagle3 / DFlash / DSpark for an equal-budget 1000 optimizer steps on
-# the same online Qwen3-4B data, logging all three runs to W&B.
+# the same online Qwen3-4B data, logging all three runs to SwanLab.
 #
 # Shared budget:
 #   * global batch 64, 1000 optimizer steps (~64k samples seen)

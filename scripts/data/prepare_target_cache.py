@@ -42,7 +42,6 @@ from deepspec.utils import (
 )
 
 os.environ["USE_TORCH"] = "true"
-os.environ["WANDB_DISABLED"] = "true"
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 # PyTorch 2.10 Inductor still reads the legacy allow_tf32 flag while compiling.

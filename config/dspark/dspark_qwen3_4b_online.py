@@ -73,9 +73,9 @@ logging = dict(
     # Online checkpoints carry a full fp32 optimizer state per rank (~31GB for
     # 4 ranks). Keep only the two newest so long runs do not fill the disk.
     max_checkpoints_to_keep=2,
-    wandb=dict(
+    swanlab=dict(
         project="deepspec",
-        entity="jl-ai",
+        workspace="joluck",
         name=None,
         mode="online",
     ),
